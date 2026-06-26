@@ -1,5 +1,5 @@
 WebBanking {
-  version = 0.2,
+  version = 0.3,
   country = "de",
   description = "Include your IBKR stock portfolio in MoneyMoney.",
   services = {"IBKR"}
@@ -52,25 +52,64 @@ function InitializeSession(protocol, bankCode, username, customer, password)
   end
 end
 
+local statementContent
+local baseCurrency
+
+local fetchStatement = function()
+  if statementContent == nil then
+      local ec
+      repeat
+          local url = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement?t=" .. token .. "&q=" .. code .. "&v=3"
+          statementContent = connection:request("GET", url, "", "", {["User-Agent"] = "MoneyMoney IBKR Plugin"})
+          charset, mimeType = nil, nil
+          local ec=parseBlock(statementContent, 'ErrorCode')
+          if ec=="1019" then
+              MM.sleep(1)
+          end
+      until ec ~="1019"
+  end
+  return statementContent
+end
+
+local getBaseCurrency = function()
+  if baseCurrency then
+      return baseCurrency
+  end
+  if statementContent then
+      baseCurrency = string.match(statementContent, 'toCurrency="([A-Z]+)"')
+      if not baseCurrency then
+          baseCurrency = string.match(statementContent, 'currency="([A-Z]+)" fxRateToBase="1"')
+      end
+      if not baseCurrency then
+          baseCurrency = string.match(statementContent, 'fxRateToBase="1"[^>]*currency="([A-Z]+)"')
+      end
+  end
+  if not baseCurrency then
+      baseCurrency = "EUR"
+  end
+  return baseCurrency
+end
+
 function ListAccounts(knownAccounts)
+  fetchStatement()
+  local baseCurr = getBaseCurrency()
+
   local account = {
       name = "IBKR",
       accountNumber = 1,
-      currency = "EUR",
+      currency = baseCurr,
       portfolio = true,
       type = "AccountTypePortfolio"
   }
   local account2 = {
       name = "IBKR Cash",
       accountNumber = 2,
-      currency = "EUR",
+      currency = baseCurr,
       type = "AccountTypeOther"
   }
 
   return {account, account2}
 end
-
-local statementContent
 
 function stringToTimestamp(str)
   local datePattern = '(%d%d%d%d)(%d%d)(%d%d)'
@@ -84,20 +123,8 @@ end
 function RefreshAccount(account, since)
   print("RefreshAccount " .. JSON():set(account):json())
 
-  if statementContent == nil then
-      local ec
-      repeat
-          local url = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement?t=" .. token .. "&q=" .. code .. "&v=3"
-          statementContent = connection:request("GET", url, "", "", {["User-Agent"] = "MoneyMoney IBKR Plugin"})
-          charset, mimeType = nil, nil
-          local ec=parseBlock(statementContent, 'ErrorCode')
-          if ec=="1019" then
-              MM.sleep(1)
-          end
+  fetchStatement()
 
-      until ec ~="1019"
-
-  end
   if account.accountNumber == "1" then
       local positions = parseBlock(statementContent, 'OpenPositions')
       local securities = {}
@@ -118,7 +145,7 @@ function RefreshAccount(account, since)
               currencyOfPurchasePrice = pos.currency,
               exchangeRate = 1 / pos.fxRateToBase,
               amount = pos.positionValue * pos.fxRateToBase,
-              userdata = {{key="_profit",value=string.format("%.02f", pos.fifoPnlUnrealized*pos.fxRateToBase) .. " EUR" .. (pos.costBasisMoney ~= "0" and (" / " .. string.format("%.05f", 100/pos.costBasisMoney*pos.positionValue-100) .. " %") or "")}}
+              userdata = {{key="_profit",value=string.format("%.02f", pos.fifoPnlUnrealized*pos.fxRateToBase) .. " " .. getBaseCurrency() .. (pos.costBasisMoney ~= "0" and (" / " .. string.format("%.05f", 100/pos.costBasisMoney*pos.positionValue-100) .. " %") or "")}}
           }
 
       end
@@ -145,7 +172,7 @@ function RefreshAccount(account, since)
               transactions[#transactions + 1] = {
                   name=sm.description,
                   amount=sm.amount,
-                  currency="EUR",
+                  currency=getBaseCurrency(),
                   bookingDate=stringToTimestamp(sm.reportDate),
                   valueDate=stringToTimestamp(sm.settleDate),
                   transactionCode=sm.transactionID,
@@ -167,4 +194,4 @@ function EndSession()
   -- Logout.
 end
 
--- SIGNATURE: MCsCFHF+25SfP/5FOEXYuH4H1XCoVDF7AhNF3D9StNKYUYIheUUOaFSh8dDr
+
